@@ -15,6 +15,7 @@ The headless profile is defined by the database-supervisor API, not by an upstre
 | Mode     | Upstream profile    | Known working                                                                            |
 | -------- | ------------------- | ---------------------------------------------------------------------------------------- |
 | attached | legacy GUI tools    | 1.4.0                                                                                    |
+| attached | Hex-Rays IDA MCP    | builds serving `open_database`, `list_databases`, `close_database`, and `execute_python` |
 | headless | database supervisor | builds serving `idb_open`, `idb_list`, and `idb_close`                                   |
 | headless | Hex-Rays IDA MCP    | builds serving `open_database`, `list_databases`, `close_database`, and `execute_python` |
 
@@ -117,7 +118,7 @@ Headless cleanup uses the upstream database lifecycle. Abruptly terminating REA,
 
 ## Use the official Hex-Rays IDA MCP
 
-The `hexrays` protocol drives the [Hex-Rays IDA MCP](https://github.com/HexRaysSA/ida-mcp) headlessly. Upstream requires IDA 9.4 or later with idalib and Python 3.11 or later, with `uv` and Git on `PATH`; REA installs none of them. Register the server for stdio:
+The `hexrays` protocol drives the [Hex-Rays IDA MCP](https://github.com/HexRaysSA/ida-mcp) headlessly or against an open IDA GUI. Headless analysis requires IDA 9.4 or later with idalib and Python 3.11 or later, with `uv` and Git on `PATH`; REA installs none of them. Register the server for stdio:
 
 ```json
 {
@@ -128,11 +129,17 @@ The `hexrays` protocol drives the [Hex-Rays IDA MCP](https://github.com/HexRaysS
 }
 ```
 
-The profile is headless and stdio only. Hex-Rays database leases belong to the MCP server process, so REA's own stdio child is what makes a lease provably REA's. Attached and HTTP Hex-Rays registrations are rejected, and analyzing a database already open in the IDA GUI is not supported. A registration that omits `protocol` but reaches a Hex-Rays server fails at startup with `advertised_tools` and a recovery naming the `hexrays` registration.
+Headless mode requires stdio. Hex-Rays worker leases belong to the MCP server process, so REA's own stdio child is what makes a lease provably REA's; HTTP headless registrations are rejected. A registration that omits `protocol` but reaches a Hex-Rays server fails at startup with `advertised_tools` and a recovery naming the `hexrays` registration.
 
 Any stdio command that starts the server works; copy `command` and `args` from your working installation, such as `uvx ida-mcp stdio` or the Claude Code plugin's `uv run ... ida-mcp stdio`. Upstream's README adds `--exclude-newer=1s` to the `uvx` form, which resolves the newest release on every start, so it can run a release newer than the ones verified below.
 
 REA copies and verifies the input in a private workspace as for the database supervisor, then calls `open_database` on that copy with `set_current: false`. Hex-Rays assigns the instance id; REA binds the session only when the reply reports an `idalib` backend and `list_databases` shows that id leased for the private input. A GUI database is refused, and the open is treated as unverified.
+
+### Analyze a target the IDA GUI holds open
+
+Attached mode binds the database the user's IDA GUI holds open instead of leasing a worker. Register with `"mode": "attached"` and `"protocol": "hexrays"`; a local HTTP registration to the already-running server is also accepted, because the GUI database belongs to the user's IDA, not to REA's registration.
+
+REA lists `list_databases` and tries every `gui` backend that is `available`, calling `open_database` on each. A candidate the server opens as an `idalib` worker is not the GUI database REA admitted and is rejected per candidate. REA binds the first candidate whose database-RECORDED input SHA-256, read through the health query's `retrieve_input_file_sha256`, matches the REA-selected target digest case-insensitively; a database that recorded no digest fails the match closed, so a rebuilt file at the same path cannot make an old database pass. When no candidate matches, the failure lists every candidate with its reason. Inventory rows list GUI databases without an instance id, but each open assigns REA's connection an MCP-local lease id that every later query is pinned to. The recorded digest, input path, and image base are rechecked around every request; there is no private input copy and no worker lease. Closing the session closes REA's connection only; the GUI database is never saved, closed, or released by REA.
 
 ### Start from an existing IDA database
 

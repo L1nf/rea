@@ -37,6 +37,18 @@ export const hexRaysOpenSchema = z
   })
   .passthrough();
 
+/**
+ * An attached open binds this connection to a GUI database, which the server
+ * holds no lease on and therefore reports no instance id for.
+ */
+export const hexRaysAttachedOpenSchema = z
+  .object({
+    instance_id: z.string().nullable(),
+    backend: z.enum(["gui", "idalib"]),
+    status: z.string(),
+  })
+  .passthrough();
+
 /** Inventory rows; `instance_id` is null for databases this server holds no lease on. */
 export const hexRaysListSchema = z
   .object({
@@ -82,10 +94,12 @@ const queryBridge = () => {
  * fixed, read-only query bridge. Only the query name and its JSON arguments
  * vary; caller text never becomes Python source. The observation records the
  * actual upstream tool and the bridge digest instead of the bridge body.
+ * Without an instance id the query runs against the connection's current
+ * database, which an attached open binds to a GUI database.
  */
 export const runHexRaysQuery = async (
   connection: IdaMcpConnection,
-  instanceId: string,
+  instanceId: string | undefined,
   query: string,
   args: Readonly<Record<string, JsonValue>>,
   timeoutMs: number,
@@ -100,7 +114,7 @@ export const runHexRaysQuery = async (
   const raw = await connection.call(
     "execute_python",
     {
-      instance_id: instanceId,
+      ...(instanceId === undefined ? {} : { instance_id: instanceId }),
       // A JSON string literal is also a valid Python string literal.
       code: `${bridge.code}\n_rea_query(${JSON.stringify(query)}, ${JSON.stringify(JSON.stringify(queryArguments))})`,
       // Leave the engine deadline inside the request deadline, so upstream
@@ -113,7 +127,7 @@ export const runHexRaysQuery = async (
   return {
     tool: "execute_python",
     arguments: {
-      instance_id: instanceId,
+      ...(instanceId === undefined ? {} : { instance_id: instanceId }),
       query,
       query_arguments: queryArguments,
       bridge_sha256: bridge.sha256,

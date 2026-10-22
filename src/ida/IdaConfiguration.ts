@@ -66,13 +66,16 @@ const registrationSchema = z
     (config) => config.protocol !== "native" || config.mode === "attached",
     "The native IDA MCP protocol requires attached mode",
   )
-  // Hex-Rays database leases belong to the MCP server process. Only a stdio
-  // registration gives REA a server, and therefore leases, of its own.
+  // Hex-Rays worker leases belong to the MCP server process. Only a stdio
+  // registration gives REA a server, and therefore worker leases, of its own;
+  // attached GUI databases already belong to the user's IDA, so a local HTTP
+  // registration to the running server can bind them too.
   .refine(
     (config) =>
       config.protocol !== "hexrays" ||
-      (config.mode === "headless" && "command" in config),
-    "The Hex-Rays IDA MCP protocol requires a headless stdio registration",
+      config.mode === "attached" ||
+      "command" in config,
+    "The Hex-Rays IDA MCP protocol requires a stdio registration in headless mode",
   );
 
 /** An upstream MCP registration plus REA's database lifecycle selection. */

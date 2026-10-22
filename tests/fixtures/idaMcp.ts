@@ -259,6 +259,7 @@ export class RecordingIdaMcp implements IdaMcpConnection {
         return {
           status: "ok",
           input_path: this.inputPath,
+          input_sha256: this.inputSha256,
           idb_path: this.idbPath ?? `${this.inputPath}.i64`,
           module: "target.elf",
           imagebase: this.imageBase,

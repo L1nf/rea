@@ -26,6 +26,7 @@ import type { IdaConfiguration } from "./IdaConfiguration.js";
 import { idaProtocol } from "./IdaConfiguration.js";
 import { IdaToolRejection, type IdaMcpConnection } from "./IdaMcpConnection.js";
 import {
+  hexRaysAttachedOpenSchema,
   hexRaysCloseSchema,
   hexRaysListSchema,
   hexRaysOpenSchema,
@@ -186,6 +187,8 @@ export class IdaSessionClient implements AnalysisClient {
   #openCompleted = false;
   #ready = false;
   #blockingSessions: readonly UpstreamSession[] | undefined;
+  /** True once an attached open bound the connection to the matching GUI database. */
+  #hexRaysAttached = false;
   #openRejected = false;
   #callGraphAdvertised = false;
   #surveyAdvertised = false;
@@ -376,7 +379,10 @@ export class IdaSessionClient implements AnalysisClient {
       protocol === "hexrays" ? "modern" : protocol,
       database,
       {
-        ...(protocol === "hexrays" && database !== undefined
+        // An attached session queries its bound GUI database, which reports
+        // no lease id, through the connection's current database.
+        ...(protocol === "hexrays" &&
+        (database !== undefined || this.#hexRaysAttached)
           ? {
               invoke: (tool, args) =>
                 runHexRaysQuery(
@@ -699,6 +705,8 @@ export class IdaSessionClient implements AnalysisClient {
           "IDA did not return an active owned headless worker for the private input copy.",
         );
       this.#database = session;
+    } else if (protocol === "hexrays") {
+      await this.#bindAttachedHexRays();
     }
     this.#ready = true;
   }
@@ -762,6 +770,81 @@ export class IdaSessionClient implements AnalysisClient {
     return opened.instance_id;
   }
 
+  /**
+   * Bind the attached session to the GUI database whose recorded input
+   * matches the admitted target. Inventory rows report no instance id, but
+   * each open assigns this connection an MCP-local lease id that every later
+   * query is pinned to; a server that reports none keeps the current
+   * database binding instead.
+   */
+  async #bindAttachedHexRays(): Promise<void> {
+    const raw = await this.connection.call("list_databases", {});
+    this.#lifecycle.push(raw);
+    const guiDatabases = hexRaysListSchema
+      .parse(raw)
+      .instances.filter(
+        ({ backend, status }) => backend === "gui" && status === "available",
+      );
+    if (guiDatabases.length === 0)
+      throw new AnalysisProtocolError(
+        "The Hex-Rays IDA MCP reports no database open in the IDA GUI; open the selected target in IDA or use headless mode.",
+      );
+    const tried: string[] = [];
+    for (const candidate of guiDatabases) {
+      const rawOpen = await this.connection.call("open_database", {
+        path: candidate.path,
+      });
+      const opened = hexRaysAttachedOpenSchema.parse(rawOpen);
+      this.#lifecycle.push(rawOpen);
+      // An attached lease must bind the GUI database the caller admitted; a
+      // worker opened for a GUI-listed path is a different database.
+      if (opened.backend !== "gui") {
+        tried.push(`${candidate.path} (opened as ${opened.backend} worker)`);
+        continue;
+      }
+      const lease = opened.instance_id ?? undefined;
+      let health: JsonValue | undefined;
+      let readFailure: string | undefined;
+      try {
+        health = await this.#readHexRaysHealth(lease);
+      } catch (cause: unknown) {
+        // A GUI database whose recorded input cannot be read cannot match,
+        // but a transport failure must surface instead of looking like one.
+        if (
+          cause instanceof ProviderAdapterError ||
+          cause instanceof AnalysisTimeoutError ||
+          cause instanceof AnalysisResourceConstraintError
+        )
+          throw cause;
+        readFailure = cause instanceof Error ? cause.message : String(cause);
+      }
+      const parsed = modernHealthSchema.safeParse(health);
+      const recorded = parsed.success
+        ? (parsed.data.input_sha256 ?? null)
+        : null;
+      if (
+        recorded !== null &&
+        recorded.toLowerCase() === this.target.sha256.toLowerCase()
+      ) {
+        this.#database = lease;
+        this.#hexRaysAttached = true;
+        return;
+      }
+      const reason =
+        readFailure !== undefined
+          ? `identity read failed: ${readFailure}`
+          : !parsed.success
+            ? "identity observation malformed"
+            : recorded === null
+              ? "input digest not recorded"
+              : "input digest mismatch";
+      tried.push(`${candidate.path} (${reason})`);
+    }
+    throw new AnalysisProtocolError(
+      `No database open in the IDA GUI matches the selected target ${this.target.path}; GUI databases tried: ${tried.join(", ")}. Open that target in IDA or use headless mode.`,
+    );
+  }
+
   /** Upstream session inventory, normalized to the database-supervisor vocabulary. */
   async #inventory(): Promise<{
     readonly raw: JsonValue;
@@ -785,7 +868,7 @@ export class IdaSessionClient implements AnalysisClient {
     };
   }
 
-  async #readHexRaysHealth(database: string): Promise<JsonValue> {
+  async #readHexRaysHealth(database: string | undefined): Promise<JsonValue> {
     const observation = await runHexRaysQuery(
       this.connection,
       database,
@@ -820,22 +903,43 @@ export class IdaSessionClient implements AnalysisClient {
   ): Promise<JsonValue> {
     let identity: string;
     if (this.config.mode === "attached") {
-      const raw =
-        this.config.protocol === "native"
-          ? await this.#nativeMetadata()
-          : await this.connection.call("get_metadata", {});
-      const metadata = legacyMetadataSchema.parse(raw);
-      this.#metadata = raw;
-      onObserved?.(raw);
-      if (metadata.sha256.toLowerCase() !== this.target.sha256.toLowerCase())
-        throw new AnalysisProtocolError(
-          `The attached IDA input SHA-256 does not match the selected target ${this.target.path}; open that target in IDA or use headless mode.`,
-        );
-      identity = JSON.stringify([
-        metadata.path,
-        metadata.sha256.toLowerCase(),
-        metadata.base,
-      ]);
+      if (idaProtocol(this.config) === "hexrays") {
+        // The GUI database is externally mutable, so every request rechecks
+        // the digest it records for its input, not any file on disk.
+        const raw = await this.#readHexRaysHealth(this.#database);
+        const metadata = modernHealthSchema.parse(raw);
+        this.#metadata = raw;
+        onObserved?.(raw);
+        if (
+          (metadata.input_sha256 ?? null)?.toLowerCase() !==
+          this.target.sha256.toLowerCase()
+        )
+          throw new AnalysisProtocolError(
+            `The IDA GUI database does not record the SHA-256 of the selected target ${this.target.path}; open that target in IDA or use headless mode.`,
+          );
+        identity = JSON.stringify([
+          metadata.input_path,
+          (metadata.input_sha256 ?? null)?.toLowerCase(),
+          metadata.imagebase,
+        ]);
+      } else {
+        const raw =
+          this.config.protocol === "native"
+            ? await this.#nativeMetadata()
+            : await this.connection.call("get_metadata", {});
+        const metadata = legacyMetadataSchema.parse(raw);
+        this.#metadata = raw;
+        onObserved?.(raw);
+        if (metadata.sha256.toLowerCase() !== this.target.sha256.toLowerCase())
+          throw new AnalysisProtocolError(
+            `The attached IDA input SHA-256 does not match the selected target ${this.target.path}; open that target in IDA or use headless mode.`,
+          );
+        identity = JSON.stringify([
+          metadata.path,
+          metadata.sha256.toLowerCase(),
+          metadata.base,
+        ]);
+      }
     } else {
       if (this.#database === undefined || this.#workspace === undefined)
         throw new AnalysisProtocolError(
@@ -998,6 +1102,8 @@ export class IdaSessionClient implements AnalysisClient {
     await this.#tail;
     if (this.#closed) return ok(null);
     try {
+      // An attached session holds no lease and no workspace; the bound GUI
+      // database belongs to the user's IDA and is never closed or saved here.
       if (this.#workspace !== undefined && this.#openAttempted) {
         if (this.#database === undefined) {
           const inventory = await this.#inventory();

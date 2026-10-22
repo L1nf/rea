@@ -66,6 +66,7 @@ const [
   { createIdaMcpConnection },
   { idaAddressSchema },
   { hasIdaDatabaseSignature },
+  { runHexRaysQuery },
 ] = await Promise.all([
   importBuilt("contracts/toolContracts.js"),
   importBuilt("domain/evidence.js"),
@@ -74,6 +75,7 @@ const [
   importBuilt("ida/IdaMcpConnection.js"),
   importBuilt("ida/IdaProtocolValues.js"),
   importBuilt("domain/analysisDatabase.js"),
+  importBuilt("ida/IdaHexRaysProtocol.js"),
 ]);
 const config = await withVerifierResourceOwner(async (resourceScope) => {
   const registration = await readIdaConfiguration(
@@ -417,6 +419,43 @@ const mcp = async (cliDossier) => {
     phase = completedPhase;
   }
 };
+/**
+ * Mirror production's attached binding: open each available GUI database and
+ * keep the first whose recorded input digest matches the target. Returns the
+ * bound database's health so its recorded digest can be asserted.
+ */
+const openAttachedHexRaysDatabase = async (upstream) => {
+  const expected = (await digest()).toLowerCase();
+  const list = await upstream.call("list_databases", {});
+  const candidates = (list.instances ?? []).filter(
+    (instance) => instance.backend === "gui" && instance.status === "available",
+  );
+  if (candidates.length === 0)
+    throw new Error("The Hex-Rays IDA MCP reports no GUI database to verify.");
+  const tried = [];
+  for (const candidate of candidates) {
+    const opened = await upstream.call("open_database", {
+      path: candidate.path,
+    });
+    if (opened.backend !== "gui") {
+      tried.push(`${candidate.path} (opened as ${opened.backend} worker)`);
+      continue;
+    }
+    const { result } = await runHexRaysQuery(
+      upstream,
+      typeof opened.instance_id === "string" ? opened.instance_id : undefined,
+      "server_health",
+      {},
+      config.timeoutMs,
+    );
+    if (String(result.input_sha256 ?? "").toLowerCase() === expected)
+      return result;
+    tried.push(`${candidate.path} (input digest mismatch)`);
+  }
+  throw new Error(
+    `No GUI database in the Hex-Rays IDA MCP matches the target digest; GUI databases tried: ${tried.join(", ")}.`,
+  );
+};
 const cleanup = async () => {
   phase = "upstream lifecycle verification";
   const upstream = createIdaMcpConnection(config, process.env);
@@ -426,8 +465,13 @@ const cleanup = async () => {
       const metadata =
         config.protocol === "native"
           ? await upstream.readResource("ida://idb/metadata")
-          : await upstream.call("get_metadata", {});
-      assert.equal(metadata.sha256.toLowerCase(), await digest());
+          : config.protocol === "hexrays"
+            ? await openAttachedHexRaysDatabase(upstream)
+            : await upstream.call("get_metadata", {});
+      const recorded = String(
+        config.protocol === "hexrays" ? metadata.input_sha256 : metadata.sha256,
+      ).toLowerCase();
+      assert.equal(recorded, await digest());
       report.checks.push(
         "existing GUI target remains open with the original input identity",
       );

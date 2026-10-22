@@ -52,6 +52,8 @@ export const modernHealthSchema = z
     imagebase: idaAddressSchema,
     auto_analysis_ready: z.boolean().nullable(),
     module: z.string(),
+    /** The input digest recorded in the database; null when none was recorded. */
+    input_sha256: z.string().nullable().optional(),
   })
   .passthrough();
 

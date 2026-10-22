@@ -67,8 +67,30 @@ const resourceScope: RetainedResourceScope = {
 const workspaces = async (root: string) =>
   (await readdir(root)).filter((name) => name.startsWith("rea-ida-"));
 
+/** An attached registration whose GUI database defaults to the target itself. */
+const attachedFixture = async () => {
+  const { root, target } = await createIdaTarget();
+  roots.push(root);
+  const producer = new RecordingHexRaysIdaMcp(target);
+  producer.peers = [{ path: target.path, backend: "gui" }];
+  const client = new IdaSessionClient(
+    {
+      command: "ida-mcp",
+      args: ["stdio"],
+      env: {},
+      mode: "attached",
+      protocol: "hexrays",
+      timeoutMs: 1000,
+      workspaceRoot: root,
+    },
+    target,
+    producer,
+  );
+  return { root, target, producer, client };
+};
+
 describe("Hex-Rays IDA MCP registration", () => {
-  it("admits only a headless stdio registration", async () => {
+  it("requires a stdio registration only in headless mode", async () => {
     const { root } = await createIdaTarget();
     roots.push(root);
     const path = join(root, "mcp.json");
@@ -84,7 +106,14 @@ describe("Hex-Rays IDA MCP registration", () => {
       ],
       [
         { command: "uvx", args: ["ida-mcp", "stdio"], protocol: "hexrays" },
-        false,
+        true,
+      ],
+      [
+        {
+          url: "http://127.0.0.1:8737/mcp",
+          protocol: "hexrays",
+        },
+        true,
       ],
       [
         {
@@ -379,5 +408,97 @@ describe("Hex-Rays IDA MCP session", () => {
       retained.producer.calls.filter(({ name }) => name === "close_database"),
     ).toHaveLength(2);
     expect(await workspaces(retained.root)).toEqual([]);
+  });
+});
+
+describe("Hex-Rays IDA MCP attached GUI sessions", () => {
+  it("binds the GUI database whose recorded digest matches the target", async () => {
+    const { root, target, producer, client } = await attachedFixture();
+    const result = await client.execute("list_procedures", {});
+    if (!result.ok) throw result.error;
+    expect(result.value.result).toEqual([{ address: "0x1000", value: "main" }]);
+    const opens = producer.calls.filter(({ name }) => name === "open_database");
+    expect(opens).toHaveLength(1);
+    expect(opens[0]?.args).toEqual({ path: target.path });
+    const reads = producer.calls.filter(
+      ({ name }) => name === "execute_python",
+    );
+    expect(reads.length).toBeGreaterThan(0);
+    // The open assigned this connection an MCP-local GUI lease id; every
+    // read is pinned to it and rechecks its recorded digest.
+    for (const read of reads)
+      expect(read.args).toMatchObject({ instance_id: "guilease1" });
+    const second = await client.execute("list_procedures", {});
+    if (!second.ok) throw second.error;
+    const health = (
+      second.value.rawResult as {
+        health_observations: { arguments: { query: string } }[];
+      }
+    ).health_observations;
+    expect(health).toHaveLength(2);
+    for (const observation of health)
+      expect(observation.arguments.query).toBe("server_health");
+    expect((await client.close()).ok).toBe(true);
+    // The bound GUI database is the user's; nothing is saved or released.
+    expect(
+      producer.calls
+        .map(({ name }) => name)
+        .filter((name) => ["close_database", "save_database"].includes(name)),
+    ).toEqual([]);
+    expect(producer.leases.size).toBe(0);
+    expect(producer.closes).toBe(1);
+    expect(await workspaces(root)).toEqual([]);
+  });
+
+  it("skips non-matching GUI databases before binding", async () => {
+    const { target, producer, client } = await attachedFixture();
+    producer.peers = [
+      { path: "/gui/other", backend: "gui", sha256: "0".repeat(64) },
+      { path: target.path, backend: "gui" },
+    ];
+    const result = await client.execute("list_procedures", {});
+    expect(result.ok).toBe(true);
+    expect(
+      producer.calls.filter(({ name }) => name === "open_database"),
+    ).toHaveLength(2);
+    await client.close();
+  });
+
+  it("reports the GUI candidates when none matches", async () => {
+    const { producer, client } = await attachedFixture();
+    producer.peers = [
+      { path: "/gui/a", backend: "gui", sha256: "0".repeat(64) },
+      { path: "/gui/b", backend: "gui", sha256: "1".repeat(64) },
+    ];
+    const result = await client.execute("list_procedures", {});
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error.message).toContain(
+        "/gui/a (input digest mismatch), /gui/b (input digest mismatch)",
+      );
+    expect((await client.close()).ok).toBe(true);
+    expect(producer.calls.some(({ name }) => name === "close_database")).toBe(
+      false,
+    );
+  });
+
+  it("rejects a GUI-listed candidate that opens as an idalib worker", async () => {
+    const { producer, client } = await attachedFixture();
+    producer.guiOpenBackend = "idalib";
+    const result = await client.execute("list_procedures", {});
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error.message).toContain("(opened as idalib worker)");
+    await client.close();
+  });
+
+  it("rejects startup when the IDA GUI has no database", async () => {
+    const { producer, client } = await attachedFixture();
+    producer.peers = [];
+    const result = await client.execute("list_procedures", {});
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error.message).toContain("no database open in the IDA GUI");
+    await client.close();
   });
 });
