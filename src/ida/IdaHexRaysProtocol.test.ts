@@ -327,6 +327,20 @@ describe("Hex-Rays IDA MCP session", () => {
     expect((await client.close()).ok).toBe(true);
   });
 
+  it("serves direct callers of its leased worker", async () => {
+    const { producer, client } = await fixture();
+    const result = await client.execute("procedure_callers", {
+      procedure: "main",
+    });
+    if (!result.ok) throw result.error;
+    expect(result.value.result).toEqual(["0x1000"]);
+    for (const read of producer.calls.filter(
+      ({ name }) => name === "execute_python",
+    ))
+      expect(read.args).toMatchObject({ instance_id: "lease1" });
+    expect((await client.close()).ok).toBe(true);
+  });
+
   it("refuses a GUI database and retains the workspace it cannot prove released", async () => {
     const { root, producer, client } = await fixture();
     producer.openBackend = "gui";
@@ -461,6 +475,29 @@ describe("Hex-Rays IDA MCP attached GUI sessions", () => {
     expect(
       producer.calls.filter(({ name }) => name === "open_database"),
     ).toHaveLength(2);
+    await client.close();
+  });
+
+  it("serves caller-proven direct callers through the query bridge", async () => {
+    const { client } = await attachedFixture();
+    const result = await client.execute("procedure_callers", {
+      procedure: "main",
+    });
+    if (!result.ok) throw result.error;
+    expect(result.value.result).toEqual(["0x1000"]);
+    const queries = (
+      result.value.rawResult as {
+        observations: { arguments: { query: string } }[];
+      }
+    ).observations.map(({ arguments: args }) => args.query);
+    expect(queries).toContain("callers");
+    const analyzed = await client.execute("analyze_function", {
+      procedure: "main",
+    });
+    if (!analyzed.ok) throw analyzed.error;
+    const dossier = functionDossierSchema.parse(analyzed.value.result);
+    expect(dossier.facet_availability?.callers).toEqual({ available: true });
+    expect(dossier.callers.map(({ address }) => address)).toEqual(["0x1000"]);
     await client.close();
   });
 

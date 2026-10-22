@@ -45,6 +45,7 @@ import {
   modernLookupSchema,
   modernLookupBatchSchema,
   modernPageSchema,
+  modernCallersSchema,
   modernXrefsSchema,
   nextOffset,
   surveySegmentsSchema,
@@ -110,6 +111,8 @@ export class IdaOperationRunner {
       readonly surveyAvailable?: boolean;
       /** The program identity REA admitted, reported by `list_documents`. */
       readonly admittedDocument?: string;
+      /** True when the upstream answers direct callers with proven call edges. */
+      readonly directCallers?: boolean;
       /** Answers modern reads through another upstream tool and reports that actual observation. */
       readonly invoke?: (
         tool: string,
@@ -510,7 +513,7 @@ export class IdaOperationRunner {
           result.set(item.address, identity({ ...item, size: "unknown" }));
         else queries.push(item.name);
       }
-    } else if (direction === "callers") {
+    } else if (direction === "callers" && this.options.directCallers !== true) {
       this.limitations.push(
         "Upstream xrefs classify references as code or data, without proving call edges. Direct callers are unavailable in this profile.",
       );
@@ -527,6 +530,41 @@ export class IdaOperationRunner {
             "Upstream xrefs do not establish direct caller relationships.",
         },
       };
+    } else if (direction === "callers") {
+      const page = modernCallersSchema.parse(
+        await this.call("callers", { addrs: [fn.address], limit: 500 }),
+      )[0];
+      if (page?.callers == null || page.error !== undefined)
+        throw new AnalysisProtocolError(
+          `IDA callers failed: ${page?.error ?? "missing callers"}`,
+        );
+      if (page.more === true)
+        this.limitations.push(
+          "Upstream callers capped results at 500; additional callers remain unknown.",
+        );
+      coverage =
+        page.more === true
+          ? {
+              status: "partial",
+              limitations: [
+                "Upstream callers capped results at 500; additional callers remain unknown.",
+              ],
+            }
+          : page.more === false
+            ? { status: "complete" }
+            : {
+                status: "unknown",
+                reason:
+                  "Upstream callers omitted an explicit truncation marker; additional callers remain unknown.",
+              };
+      for (const item of page.callers) {
+        if (item.type === "external")
+          result.set(
+            item.addr,
+            identity({ address: item.addr, name: item.name, size: "unknown" }),
+          );
+        else queries.push(item.addr);
+      }
     } else {
       const page = (
         this.protocol === "native" ? nativeCalleesSchema : modernCalleesSchema
@@ -661,7 +699,11 @@ export class IdaOperationRunner {
         return lines(await this.assembly(fn)).join("\n");
       case "procedure_callers":
       case "procedure_callees": {
-        if (operation === "procedure_callers" && this.protocol !== "legacy")
+        if (
+          operation === "procedure_callers" &&
+          this.protocol !== "legacy" &&
+          this.options.directCallers !== true
+        )
           throw new AnalysisProtocolError(
             "This IDA MCP profile cannot distinguish direct callers from other code references.",
           );

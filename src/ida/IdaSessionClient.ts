@@ -278,7 +278,7 @@ export class IdaSessionClient implements AnalysisClient {
       );
     if (
       operation === "procedure_callers" &&
-      idaProtocol(this.config) !== "legacy"
+      !["legacy", "hexrays"].includes(idaProtocol(this.config))
     )
       return err(
         new AnalysisCapabilityUnavailableError(
@@ -400,6 +400,8 @@ export class IdaSessionClient implements AnalysisClient {
         callGraphAvailable: this.#callGraphAdvertised,
         surveyAvailable: this.#surveyAdvertised,
         admittedDocument: this.target.path,
+        // The Hex-Rays query bridge proves call edges for direct callers.
+        ...(protocol === "hexrays" ? { directCallers: true } : {}),
       },
     );
   }

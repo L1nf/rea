@@ -15,6 +15,7 @@ from unittest import mock
 SOURCE = os.path.join(os.path.dirname(__file__), "hexrays_queries.py")
 BADADDR = 0xFFFFFFFFFFFFFFFF
 XREF_FAR = 1
+FL_CF, FL_CN, FL_JN, FL_DR = 0x10, 0x11, 0x13, 0x20
 
 
 class Func:
@@ -34,8 +35,8 @@ class StringItem:
 
 
 class Xref:
-    def __init__(self, frm, iscode, flow=False):
-        self.frm, self.iscode, self.flow = frm, iscode, flow
+    def __init__(self, frm, iscode, flow=False, type=None):
+        self.frm, self.iscode, self.flow, self.type = frm, iscode, flow, type
 
 
 FUNCS = [Func(0x1000, 0x1018, "main"), Func(0x2000, 0x2008, "helper")]
@@ -54,7 +55,20 @@ INSNS = {
 DATA_HEADS = {0x1014}
 IMPORTS = {0x5000: "puts", 0x5008: "exit"}
 NAMES = {"main": 0x1000, "helper": 0x2000, "data_label": 0x4000}
-XREFS = {0x2000: [Xref(0x1004, True), Xref(0x1ffc, True, flow=True), Xref(0x1004, True)]}
+XREFS = {
+    # References to main's entry: calls from helper and from main itself
+    # (recursion), a jump and a data reference that must not become callers,
+    # and a call from outside every function.
+    0x1000: [
+        Xref(0x2004, True, type=FL_CF),
+        Xref(0x2000, True, type=FL_CF),
+        Xref(0x1010, True, type=FL_CN),
+        Xref(0x1008, True, type=FL_JN),
+        Xref(0x4000, False, type=FL_DR),
+        Xref(0x7000, True, type=FL_CF),
+    ],
+    0x2000: [Xref(0x1004, True), Xref(0x1ffc, True, flow=True), Xref(0x1004, True)],
+}
 STRINGS = [(0x6000 + index, f"string {index}") for index in range(5)]
 PSEUDOCODE = ["int main(void)", "{", "  helper();", "  return 0;", "}"]
 
@@ -126,6 +140,7 @@ def stand_ins():
     m["ida_ua"].decode_insn = decode_insn
     m["ida_idp"].is_call_insn = lambda insn: INSNS[insn.ea][1]
     m["ida_xref"].XREF_FAR = XREF_FAR
+    m["ida_xref"].fl_CF, m["ida_xref"].fl_CN, m["ida_xref"].fl_JN, m["ida_xref"].fl_DR = FL_CF, FL_CN, FL_JN, FL_DR
     m["idautils"].FuncItems = lambda start: [ea for ea in sorted(INSNS) if get_func(ea).start_ea == start]
     m["idautils"].CodeRefsFrom = lambda ea, flow: list(INSNS[ea][2])
     m["idautils"].DataRefsFrom = lambda ea: list(INSNS[ea][3])
@@ -208,6 +223,27 @@ class BridgeTest(unittest.TestCase):
         [capped] = self.query("callees", {"addrs": ["0x1000"], "limit": 1})
         self.assertTrue(capped["more"])
         self.assertEqual(len(capped["callees"]), 1)
+
+    def test_callers_keep_call_edges_only(self):
+        [row] = self.query("callers", {"addrs": ["0x1000"], "limit": 500})
+        self.assertEqual(
+            row,
+            {
+                "callers": [
+                    {"addr": "0x1000", "name": "main", "type": "internal"},
+                    {"addr": "0x2000", "name": "helper", "type": "internal"},
+                    {"addr": "0x7000", "name": "0x7000", "type": "external"},
+                ],
+                "more": False,
+            },
+        )
+        [capped] = self.query("callers", {"addrs": ["0x1000"], "limit": 1})
+        self.assertTrue(capped["more"])
+        self.assertEqual(len(capped["callers"]), 1)
+        self.assertEqual(
+            self.query("callers", {"addrs": ["0x1004"], "limit": 5}),
+            [{"callers": None, "error": "Not a function"}],
+        )
 
     def test_callgraph_reports_function_entries_only(self):
         [row] = self.query("callgraph", {"roots": ["0x1000"], "max_depth": 0})

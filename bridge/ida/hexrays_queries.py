@@ -251,6 +251,38 @@ def callees(addrs, limit):
     return rows
 
 
+def callers(addrs, limit):
+    rows = []
+    for addr in addrs:
+        f = _entry(addr)
+        if f is None:
+            rows.append({"callers": None, "error": "Not a function"})
+            continue
+        found = {}
+        # Call edges only, flow-insensitively: jumps, data references and
+        # ordinary flow are not callers. A self-entry is real recursion.
+        for xref in idautils.XrefsTo(f.start_ea, 0):
+            if xref.type not in (ida_xref.fl_CN, ida_xref.fl_CF):
+                continue
+            referrer = ida_funcs.get_func(xref.frm)
+            if referrer is not None:
+                # Several call sites in one referrer are one caller.
+                found[referrer.start_ea] = {
+                    "addr": _hex(referrer.start_ea),
+                    "name": _function(referrer)["name"],
+                    "type": "internal",
+                }
+            else:
+                found[xref.frm] = {
+                    "addr": _hex(xref.frm),
+                    "name": ida_name.get_name(xref.frm) or _hex(xref.frm),
+                    "type": "external",
+                }
+        items = [found[to] for to in sorted(found)]
+        rows.append({"callers": items[:limit], "more": len(items) > limit})
+    return rows
+
+
 def callgraph(roots, max_depth):
     if max_depth != 0:
         raise ValueError("REA requests depth-zero call graphs only")
@@ -315,6 +347,7 @@ _REA_QUERIES = {
     "decompile": decompile,
     "disasm": disasm,
     "callees": callees,
+    "callers": callers,
     "callgraph": callgraph,
     "xrefs_to": xrefs_to,
     "survey_binary": survey_binary,

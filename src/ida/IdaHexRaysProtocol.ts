@@ -24,6 +24,7 @@ const hexRaysQueries: ReadonlySet<string> = new Set([
   "decompile",
   "disasm",
   "callees",
+  "callers",
   "callgraph",
   "xrefs_to",
   "survey_binary",

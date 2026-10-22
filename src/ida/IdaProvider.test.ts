@@ -80,6 +80,32 @@ it("keeps a selected valid registration distinct from a live IDA connection", as
 });
 
 describe("IDA provider target support", () => {
+  it("advertises direct callers for the Hex-Rays profile", async () => {
+    const root = await createTestTempDirectory("rea-ida-hexrays-");
+    const path = join(root, "registration.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        mode: "headless",
+        protocol: "hexrays",
+        command: "ida-mcp",
+        args: ["stdio"],
+      }),
+    );
+    const config = parseConfig({ REA_IDA_MCP_CONFIG: path });
+    if (!config.ok) throw config.error;
+    const provider = new IdaProvider(config.value, {});
+    try {
+      const { capabilities } = await provider.inspectReadinessSnapshot();
+      expect(
+        capabilities.find(({ operation }) => operation === "procedure_callers")
+          ?.available,
+      ).toBe(true);
+    } finally {
+      const closed = await provider.closeOwnedResources();
+      if (!closed.ok) throw closed.error;
+    }
+  });
   it("declines headerless raw-binary targets", () => {
     const config = parseConfig({});
     if (!config.ok) throw new Error("expected valid configuration");

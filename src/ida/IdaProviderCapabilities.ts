@@ -68,17 +68,24 @@ const ATTACHED_GUI_NAVIGATION_OPERATIONS: ReadonlySet<IdaOperation> = new Set([
   "analyze_function",
 ]);
 
-/** Advertise live observations and configured lifecycle effects truthfully. */
+/**
+ * Advertise live observations and configured lifecycle effects truthfully.
+ * `hexrays` marks the official Hex-Rays profile, whose query bridge proves
+ * call edges for direct callers.
+ */
 export const idaCapabilities = (
   mode: "attached" | "headless",
   stdio: boolean,
   native = false,
+  hexrays = false,
 ): readonly CapabilityDescriptor[] =>
   IDA_OPERATIONS.filter((operation) => idaProfileAdmits(operation, mode)).map(
     (operation) => ({
       provider: IDA_PROVIDER_IDENTITY,
       operation,
-      ...((mode === "headless" || native) && operation === "procedure_callers"
+      ...((mode === "headless" || native) &&
+      operation === "procedure_callers" &&
+      !hexrays
         ? ({
             available: false,
             reason: native

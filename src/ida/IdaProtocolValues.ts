@@ -183,6 +183,23 @@ export const modernCalleesSchema = z
     }),
   )
   .length(1);
+export const modernCallersSchema = z
+  .array(
+    z.object({
+      callers: z
+        .array(
+          z.object({
+            addr: idaAddressSchema,
+            name: z.string(),
+            type: z.enum(["internal", "external"]),
+          }),
+        )
+        .nullable(),
+      error: z.string().optional(),
+      more: z.boolean().optional(),
+    }),
+  )
+  .length(1);
 /** Depth-one `callgraph` reply: one row per root, with function-only call edges. */
 export const modernCallGraphSchema = z
   .array(

@@ -192,6 +192,13 @@ export class RecordingIdaMcp implements IdaMcpConnection {
             more: false,
           },
         ];
+      case "callers":
+        return [
+          {
+            callers: [{ addr: fn.address, name: fn.name, type: "internal" }],
+            more: false,
+          },
+        ];
       case "get_xrefs_to":
         return [{ address: "0x1004", type: "code", function: fn }];
       case "xrefs_to":

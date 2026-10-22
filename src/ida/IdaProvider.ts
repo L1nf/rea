@@ -170,6 +170,7 @@ export class IdaProvider implements AnalysisProviderCandidate {
           config.value.mode,
           "command" in config.value,
           config.value.protocol === "native",
+          config.value.protocol === "hexrays",
         )
       : this.capabilities();
     const registrationDiagnostics = {
