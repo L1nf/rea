@@ -248,3 +248,102 @@ workspaceCliTest.for([
     }
   },
 );
+
+/** Serve the Hex-Rays catalog with no database open in the IDA GUI. */
+const createGuilessHexRaysServer = async () => {
+  const server = createServer(async (request, response) => {
+    if (request.method !== "POST") {
+      response.writeHead(405).end();
+      return;
+    }
+    let body = "";
+    for await (const chunk of request) body += String(chunk);
+    const rpc = requestSchema.parse(JSON.parse(body));
+    if (rpc.id === undefined) {
+      response.writeHead(202).end();
+      return;
+    }
+    const send = (result: unknown) =>
+      response
+        .writeHead(200, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }));
+    if (rpc.method === "initialize") {
+      send({
+        protocolVersion: rpc.params?.protocolVersion,
+        capabilities: { tools: {} },
+        serverInfo: { name: "ida-mcp", version: "fixture" },
+      });
+      return;
+    }
+    if (rpc.method === "tools/list") {
+      send({
+        tools: [
+          "open_database",
+          "list_databases",
+          "close_database",
+          "execute_python",
+        ].map((name) => ({
+          name,
+          inputSchema: { type: "object", properties: {} },
+        })),
+      });
+      return;
+    }
+    if (rpc.params?.name === "list_databases") {
+      send({
+        content: [{ type: "text", text: JSON.stringify({ instances: [] }) }],
+      });
+      return;
+    }
+    throw new Error("Unexpected tool call: " + String(rpc.params?.name));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return server;
+};
+
+workspaceCliTest(
+  "reports the attached Hex-Rays GUI binding refusal through the public CLI",
+  async ({ cli, workspace }) => {
+    const server = await createGuilessHexRaysServer();
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        throw new Error("Missing server address");
+      const registration = await workspace.write(
+        "ida.json",
+        JSON.stringify({
+          url: `http://127.0.0.1:${address.port}/mcp`,
+          mode: "attached",
+          protocol: "hexrays",
+          timeoutMs: 500,
+        }),
+      );
+      const target = await workspace.write("target.elf", elf(2, 1, 62));
+      const result = await cli.run({
+        arguments: ["decompile", target, "main", "--provider", "ida", "--json"],
+        environment: {
+          ...workspace.environment,
+          REA_IDA_MCP_CONFIG: registration,
+          REA_LOG_LEVEL: "silent",
+        },
+        timeoutMs: 15000,
+      });
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(1);
+      expect(result.json).toMatchObject({ code: "unreadable_output" });
+      expect(result.json).toMatchObject({
+        message: expect.stringContaining("no database open in the IDA GUI"),
+      });
+      expect(result.json).toMatchObject({
+        message: expect.stringContaining("use headless mode"),
+      });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) =>
+          error === undefined ? resolve() : reject(error),
+        ),
+      );
+    }
+  },
+);

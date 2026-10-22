@@ -99,9 +99,23 @@ export type ResourceConstraintRecovery =
       readonly retryable?: boolean;
     };
 
-/** Provider-neutral invalid analysis input or output at an application boundary. */
+/**
+ * Provider-neutral invalid analysis input or output at an application boundary.
+ * The diagnostic `message` may carry producer details or embedded causes, so a
+ * producer that knows a caller-safe explanation opts in through `userMessage`;
+ * the shared presentation channel decides what each adapter surfaces.
+ */
 export class AnalysisProtocolError extends AnalysisError {
   readonly _tag = "AnalysisProtocolError";
+  override readonly userMessage: string | undefined;
+
+  constructor(
+    message: string,
+    options?: AnalysisErrorOptions & { readonly userMessage?: string },
+  ) {
+    super(message, options);
+    this.userMessage = options?.userMessage;
+  }
 }
 
 /** Caller input failed provider-neutral application parsing. */

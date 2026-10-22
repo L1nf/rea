@@ -97,6 +97,14 @@ const isIdaOperation = (operation: string): operation is IdaOperation =>
 const wasCancelled = (options: ExecutionOptions | undefined): boolean =>
   options?.signal?.aborted === true;
 
+/**
+ * An attached-database refusal whose text names the caller's recovery. It is
+ * caller-safe as written, so it rides the error's user-message channel instead
+ * of degrading to the generic unreadable-output explanation.
+ */
+const attachedDatabaseRefusal = (message: string): AnalysisProtocolError =>
+  new AnalysisProtocolError(message, { userMessage: message });
+
 interface IdaOperationFailureContext {
   runner: IdaOperationRunner | undefined;
   metadataBefore: JsonValue | undefined;
@@ -788,7 +796,7 @@ export class IdaSessionClient implements AnalysisClient {
         ({ backend, status }) => backend === "gui" && status === "available",
       );
     if (guiDatabases.length === 0)
-      throw new AnalysisProtocolError(
+      throw attachedDatabaseRefusal(
         "The Hex-Rays IDA MCP reports no database open in the IDA GUI; open the selected target in IDA or use headless mode.",
       );
     const tried: string[] = [];
@@ -842,7 +850,7 @@ export class IdaSessionClient implements AnalysisClient {
               : "input digest mismatch";
       tried.push(`${candidate.path} (${reason})`);
     }
-    throw new AnalysisProtocolError(
+    throw attachedDatabaseRefusal(
       `No database open in the IDA GUI matches the selected target ${this.target.path}; GUI databases tried: ${tried.join(", ")}. Open that target in IDA or use headless mode.`,
     );
   }
@@ -916,7 +924,7 @@ export class IdaSessionClient implements AnalysisClient {
           (metadata.input_sha256 ?? null)?.toLowerCase() !==
           this.target.sha256.toLowerCase()
         )
-          throw new AnalysisProtocolError(
+          throw attachedDatabaseRefusal(
             `The IDA GUI database does not record the SHA-256 of the selected target ${this.target.path}; open that target in IDA or use headless mode.`,
           );
         identity = JSON.stringify([
@@ -933,7 +941,7 @@ export class IdaSessionClient implements AnalysisClient {
         this.#metadata = raw;
         onObserved?.(raw);
         if (metadata.sha256.toLowerCase() !== this.target.sha256.toLowerCase())
-          throw new AnalysisProtocolError(
+          throw attachedDatabaseRefusal(
             `The attached IDA input SHA-256 does not match the selected target ${this.target.path}; open that target in IDA or use headless mode.`,
           );
         identity = JSON.stringify([

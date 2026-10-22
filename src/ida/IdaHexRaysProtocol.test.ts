@@ -534,8 +534,16 @@ describe("Hex-Rays IDA MCP attached GUI sessions", () => {
     producer.peers = [];
     const result = await client.execute("list_procedures", {});
     expect(result.ok).toBe(false);
-    if (!result.ok)
+    if (!result.ok) {
       expect(result.error.message).toContain("no database open in the IDA GUI");
+      // The refusal names the caller's recovery, so the shared projection must
+      // surface it instead of the generic unreadable-output explanation.
+      const projected = projectAnalysisError(result.error);
+      expect(projected.message).toContain("no database open in the IDA GUI");
+      expect(projected.message).toContain("use headless mode");
+      expect(projected.message).not.toContain("rea doctor");
+      expect(projected.remediation.action).toContain("use headless mode");
+    }
     await client.close();
   });
 });

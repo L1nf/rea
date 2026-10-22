@@ -4,6 +4,7 @@ import {
   AnalysisUnsupportedTargetError,
   AnalysisInputError,
   AnalysisOutputError,
+  AnalysisProtocolError,
   AnalysisCancelledError,
   AnalysisTimeoutError,
   AnalysisResourceConstraintError,
@@ -683,6 +684,34 @@ describe("analysis error projection: retry guidance", () => {
         expect(text).not.toMatch(/\bretry\b/iu);
     },
   );
+});
+
+describe("analysis error projection: protocol failure explanations", () => {
+  it("surfaces a protocol failure's caller-safe explanation while keeping its diagnostic text internal", () => {
+    const explanation =
+      "The provider reports no database open in the GUI; open the selected target or use headless mode.";
+    const projected = projectAnalysisError(
+      new AnalysisProtocolError("producer diagnostic with internal detail", {
+        userMessage: explanation,
+      }),
+    );
+
+    expect(projected).toMatchObject({
+      code: "unreadable_output",
+      message: explanation,
+      remediation: { action: explanation },
+    });
+    expect(analysisErrorProjectionSchema.parse(projected)).toEqual(projected);
+    expect(JSON.stringify(projected)).not.toContain("internal detail");
+    // Without the channel the producer's diagnostic message stays internal.
+    expect(
+      projectAnalysisError(
+        new AnalysisProtocolError("producer diagnostic with internal detail"),
+      ).message,
+    ).toBe(
+      "Analysis returned an unreadable result. Run `rea doctor` and review the reported details; repeating the unchanged request is not expected to succeed.",
+    );
+  });
 });
 
 describe("analysis error projection: caller contract", () => {

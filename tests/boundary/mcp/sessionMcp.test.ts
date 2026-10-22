@@ -3,7 +3,7 @@ import { readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import type { CallToolResult } from "@modelcontextprotocol/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished } from "vitest";
 import { z } from "zod";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -34,6 +34,10 @@ import {
 } from "../../../src/contracts/toolOutputSchemaPrimitives.js";
 import { toolContract } from "../../../src/contracts/toolContracts.js";
 import { ok as resultOk } from "../../../src/domain/result.js";
+import { parseConfig } from "../../../src/config/parseConfig.js";
+import { IdaProvider } from "../../../src/ida/IdaProvider.js";
+import { createIdaTarget } from "../../fixtures/idaMcp.js";
+import { RecordingHexRaysIdaMcp } from "../../fixtures/idaHexRaysMcp.js";
 import {
   createSessionMcpHarness,
   snapshotAndRecordUnknown,
@@ -658,3 +662,62 @@ const structured = (result: CallToolResult): Record<string, unknown> => {
     );
   return z.record(z.string(), z.unknown()).parse(result.structuredContent);
 };
+
+describe("attached Hex-Rays registration over MCP", () => {
+  it("delivers the GUI binding refusal with its message in the tool error payload", async () => {
+    const { root, target } = await createIdaTarget();
+    directory = root;
+    const path = join(root, "registration.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        command: "uvx",
+        args: ["ida-mcp", "stdio"],
+        mode: "attached",
+        protocol: "hexrays",
+        workspaceRoot: root,
+      }),
+    );
+    const config = parseConfig({ REA_IDA_MCP_CONFIG: path });
+    if (!config.ok) throw config.error;
+    // An empty `peers` list: no database is open in the IDA GUI.
+    const producer = new RecordingHexRaysIdaMcp(target);
+    const session = createTestBinarySession(
+      new IdaProvider(config.value, {}, () => producer),
+    );
+    const server = createServer(
+      { kind: "session", session },
+      { logger: silentLogger },
+    );
+    const mcp = new Client({ name: "ida-hexrays-mcp", version: "1" });
+    onTestFinished(async () => {
+      await mcp.close();
+      await server.close();
+      await session.close();
+    });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+
+    const opened = await mcp.callTool({
+      name: "open_binary",
+      arguments: { path: target.path, provider_id: "ida" },
+    });
+    expect(opened.isError, JSON.stringify(opened)).not.toBe(true);
+    // Session open defers deep-provider startup, so the first analysis tool
+    // drives the attached binding and reports its refusal.
+    const listed = await mcp.callTool({
+      name: "list_procedures",
+      arguments: {},
+    });
+    expect(producer.calls.map(({ name }) => name)).toContain("list_databases");
+
+    const failure = parseMcpToolError(listed);
+    expect(failure.error.code).toBe("unreadable_output");
+    expect(failure.error.message).toContain("no database open in the IDA GUI");
+    expect(failure.error.message).toContain("use headless mode");
+    // The refusal is the payload's explanation, not the generic projection.
+    expect(failure.error.message).not.toContain("rea doctor");
+  });
+});
