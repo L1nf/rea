@@ -1,0 +1,12 @@
+{
+  "name": "rea",
+  "version": "6.7.0",
+  "description": "Reverse-engineer-anything skill: analyze native, managed, Electron/JS, Android APK and firmware targets with the REA CLI (invoked via npx on demand).",
+  "description_i18n": {
+    "zh-CN": "通用逆向技能：借助 REA CLI 按需分析原生程序、托管程序、Electron/JS、Android APK 与固件目标"
+  },
+  "author": {
+    "name": "L1nf"
+  },
+  "skills": "./skills"
+}
